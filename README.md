@@ -1,1 +1,304 @@
-# projetoCompass02
+![AWS](https://img.shields.io/badge/AWS-%23FF9900.svg?style=for-the-badge&logoColor=white)
+![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)
+![WordPress](https://img.shields.io/badge/WordPress-%23117AC9.svg?style=for-the-badge&logo=WordPress&logoColor=white)
+
+# Infraestrutura de Alta Disponibilidade para WordPress na AWS
+
+## Sobre o Projeto
+
+Este projeto documenta o passo a passo para criar uma infraestrutura escalável e de alta disponibilidade para hospedar um site WordPress na AWS. A arquitetura utiliza um Application Load Balancer para distribuir o tráfego entre instâncias EC2, que são gerenciadas por um Auto Scaling Group. Para garantir a persistência e o compartilhamento de dados entre as instâncias, o Amazon EFS é usado para os arquivos do WordPress e o Amazon RDS (MySQL) para o banco de dados.
+
+## 1. Pre-requisitos
+
+- Conta na AWS.
+- Conhecimento básico dos serviços AWS: VPC, EC2, RDS, EFS, ALB, Auto Scaling.
+
+## 2. Diagrama
+
+Diagrama da Infraestrutura na AWS
+
+![Diagrama do Projeto](assets/diagrama.png)
+
+## 3. Criação da VPC
+
+Siga os passos abaixo para construir a infraestrutura do zero.
+ 
+1.  No console da AWS, acesse o serviço **VPC**.
+
+2.  Clique em **"Criar VPC"** e selecione a opção **"VPC e mais"**.
+
+3.  Selecione a **Geração automática da etiqueta de nome** e atribua um nome a sua VPC.
+
+4.  Configure os seguintes parâmetros:
+    - **Bloco de CIDR IPv4**: `10.0.0.0/16`
+    - **Número de zonas de disponibilidade (AZs)**: `2`
+    - **Número de sub-redes públicas**: `2`
+    - **Número de sub-redes privadas**: `4` 
+    - **Gateways NAT**: `1 por AZ`
+
+5.  Clique em **"Criar VPC"**. O console provisionará automaticamente a VPC, sub-redes, tabelas de rotas e o Internet Gateway.
+
+![Mapa de recursos](assets/recursosVPC.png)
+
+
+## 4. Criação dos Grupos de Segurança (Security Groups)
+
+Os Security Groups (SGs) funcionam como firewalls virtuais e cada recurso necesita de um grupo de segurança específico, Sendo assim criaremos um para cada camada da nossa aplicação.
+
+1. No console da VPC, acesse **Segurança > Grupos de segurança** e clique em **"Criar grupo de segurança"**.
+
+2. SG para o EFS
+
+Permite que as instâncias EC2 acessem o sistema de arquivos.
+
+- **Nome do grupo de segurança**: `efs-sg`
+- **Descrição**: `Permite acesso NFS das instancias EC2`
+- **VPC**: Selecione a VPC criada no passo 1.
+- **Regras de entrada**:
+    - **Tipo**: `NFS`
+    - **Protocolo**: `TCP`
+    - **Intervalo de portas**: `2049`
+    - **Origem**: `ec2-sg` (Você criará este SG a seguir. Pode deixar o campo em branco por enquanto e editar depois).
+
+3. SG para o RDS 
+
+Permite que as instâncias EC2 se conectem ao banco de dados.
+
+- **Nome do grupo de segurança**: `rds-sg`
+- **Descrição**: `Permite acesso MySQL das instancias EC2`
+- **VPC**: Selecione a VPC criada.
+- **Regras de entrada**:
+    - **Tipo**: `MYSQL/Aurora`
+    - **Protocolo**: `TCP`
+    - **Intervalo de portas**: `3306`
+    - **Origem**: `ec2-sg`
+
+4. SG para as Instâncias EC2
+
+Permite que o Load Balancer envie tráfego e que você acesse via SSH.
+
+- **Nome do grupo de segurança**: `ec2-sg`
+- **Descrição**: `Permite trafego do ALB e acesso SSH`
+- **VPC**: Selecione a VPC criada.
+- **Regras de entrada**:
+    - **Tipo**: `HTTP`
+    - **Protocolo**: `TCP`
+    - **Intervalo de portas**: `80`
+    - **Origem**: `alb-sg` (SG do Load Balancer que será criado a seguir).
+    - **Tipo**: `SSH`
+    - **Protocolo**: `TCP`
+    - **Intervalo de portas**: `22`
+    - **Origem**: `Meu IP`
+
+5. SG para o Application Load Balancer 
+
+Permite o acesso público ao site.
+
+- **Nome do grupo de segurança**: `alb-sg`
+- **Descrição**: `Permite trafego publico HTTP`
+- **VPC**: Selecione a VPC criada.
+- **Regras de entrada**:
+    - **Tipo**: `HTTP`
+    - **Protocolo**: `TCP`
+    - **Intervalo de portas**: `80`
+    - **Origem**: `Qualquer lugar-IPv4` (`0.0.0.0/0`)
+
+
+> [!IMPORTANT] 
+> Após criar todos os SGs, volte e edite as regras de origem para referenciar os nomes dos outros SGs (`ec2-sg`, `alb-sg`, etc.), em vez de 
+> usar CIDRs. Isso torna a configuração mais segura e dinâmica.
+
+
+## 5. Amazon Relational Database Service (RDS)
+
+Criação do banco de dados:
+
+1.  Acesse o serviço **RDS** e clique em **"Criar banco de dados"**
+
+2.  Selecione **"Criação padrão"** e o mecanismo **"MySQL"**.
+
+3.  Em **Modelos**, escolha **"Nível gratuito"** (para fins de teste).
+
+4.  Configure um **nome de usuário mestre** e uma **senha**. Anote essas credenciais.
+
+5.  Em **Configuração da instância**, selecione **"db.t3.micro"**.
+
+6.  Em **Conectividade**:
+    - Selecione a VPC correta.
+    - Selecione o grupo de sub-redes do DB (geralmente criado automaticamente).
+    - **Acesso público**: `Não`.
+    - **Grupo de segurança da VPC**: Escolha **"Selecionar existentes"** e adicione o `rds-sg`.
+
+> [!IMPORTANT]
+> É importante adicionar um nome inicial, pois, caso contrário, você terá que adicioná-lo manualmente e não conseguirá se conectar ao banco de
+> dados sem ele.
+
+7.  Em **"Configuração adicional"**, defina um **nome inicial do banco de dados** (ex: `wordpress_db`).
+
+8.  Clique em **"Criar banco de dados"**. 
+
+Após a criação, anote o **endpoint (nome do host)** do banco de dados.
+
+
+## 6. Amazon Elastic File System (EFS)
+
+1.  Acesse o serviço **EFS** e clique em **"Criar sistema de arquivos"**.
+
+2.  Dê um nome ao EFS (ex: `wordpress-files`) e selecione a VPC criada.
+
+3.  Clique em **personalizar**, Mantenha as configurações padrão e avance para a etapa de **"Acesso à rede"**.
+
+4.  Certifique-se de que há um **"Destino de montagem"** em cada uma das zonas de disponibilidade onde suas sub-redes privadas estão localizadas. Associe o security group `efs-sg` a cada destino de montagem.
+
+5.  Conclua a criação. Anote o **ID do sistema de arquivos** (ex: `fs-xxxxxxxx`).
+
+
+## 7. Application Load Balancer (ALB)
+
+### 1. Grupo de destino (Target Group)
+
+1. No console do EC2, vá para **Load Balancing** > **Grupos de destino** e clique em **"Criar grupo de destino"**.
+
+2. Em **Escolha um tipo de destino**: Selecione `Instâncias`.
+
+3. **Nome do grupo de destino**: Atribua um nome para o grupo de destino.
+
+4. **Protocolo**: `HTTP`, **Porta**: `80`.
+
+5. **VPC**: Selecione sua VPC.
+
+6. **Versão do protocolo**: Selecione `HTTP1`.
+
+7. **Verificações de integridade**: 
+    - Protocolo: `HTTP`
+    - Path: `/`
+
+8. Clique em **Próximo**, não registre nenhum alvo manualmente. Após isso clique em **Criar grupo de destino**.
+
+### 2. Application Load Balancer (ALB)
+
+1. No console do EC2, vá para **Load Balancing** > **Load Balancers** e clique em **"Criar Load Balancer"**.
+
+2. Selecione **"Application Load Balancer"**.
+
+3. Atribua um nome ao Balanceador de carga.
+
+4. **Esquema**: `Voltado para a Internet`.
+
+5. **Tipo de endereço IP**: `IPv4`.
+
+6. **Rede**: Selecione sua VPC e as **sub-redes públicas** nas duas AZs.
+
+7. **Grupos de segurança**: Selecione o `alb-sg`.
+
+8. **Listeners e roteamento**:
+    - O listener para `HTTP:80` já deve estar configurado.
+    - Em **"Ação padrão"**, encaminhe para o grupo de destino criado anteriormente.
+
+9. Revise tudo e clique em **"Criar balanceador de carga"**.
+
+## 8. Auto Scaling Group
+
+### 1. Launch template
+
+1.  No console do EC2, vá para **Instâncias > Modelos de execução** e clique em **"Criar modelo de execução"**.
+
+2.  **Nome do modelo**: `wordpress-template`.
+
+3.  **AMI**: Selecione `Amazon Linux`.
+
+4.  **Tipo de instância**: `t2.micro`.
+
+5.  **Par de chaves (login)**: Selecione um par de chaves existente ou crie um novo para ter acesso SSH.
+
+6.  **Configurações de rede**: Selecione **"Selecionar grupo de segurança existente"** e escolha o `ec2-sg`.
+
+7.  Expanda a seção **"Detalhes avançados"** e cole o script abaixo no campo **"Dados do usuário" (User-data)**. 
+
+**Substitua os valores!**
+
+```bash
+#!/bin/bash
+
+# Atualizar sistema
+sudo dnf update -y
+sudo dnf upgrade -y
+
+# Instalar e Configurar EFS
+sudo dnf install -y amazon-efs-utils
+mkdir -p /mnt/efs
+sudo mount -t efs -o tls "${EFS_ID}":/ /mnt/efs
+
+# Instalar e configurar Docker 
+sudo dnf install docker -y
+sudo systemctl enable docker
+sudo systemctl start docker
+
+#Instalando Docker Compose
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+    -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+
+# Criar diretório para o WordPress
+mkdir /home/ec2-user/wordpress
+cd /home/ec2-user/wordpress
+
+# Criar docker-compose.yml
+cat > docker-compose.yml <<EOF
+version: '3.8'
+
+services:
+  wordpress:
+    image: wordpress:latest
+    container_name: wordpress
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    environment:
+      WORDPRESS_DB_HOST: "${RDS_HOST}"
+      WORDPRESS_DB_NAME: "${DB_NAME}"
+      WORDPRESS_DB_USER: "${DB_USER}"
+      WORDPRESS_DB_PASSWORD: "${DB_PASSWORD}"
+    volumes:
+    - /mnt/efs/wordpress:/var/www/html/
+EOF
+
+sudo docker-compose up -d
+```
+
+8. Clique em **Criar modelo de inicialização**.
+
+### 2. Criação do Auto Scaling Group
+
+1. No console do EC2, vá para **Auto Scaling** > **Grupos do Auto Scaling** e clique em **"Criar um grupo do Auto Scaling"**.
+
+2. **Nome**: `wordpress-asg`.
+
+3. **Modelo de inicialização**: Selecione o `wordpress-template` que você acabou de criar.
+
+4. **Rede**: Selecione a sua VPC e as sub-redes privadas nas duas AZs.
+
+5. Anexe o Balanceador de carga e o grupo de destino que criamos. 
+
+6. Configurar o tamanho do grupo:
+    - Capacidade desejada: `1`
+    - Capacidade mínima: `1`
+    - Capacidade máxima:`4`
+
+7. Siga para a etapa de Análise, revise e clique em **Criar grupo de Auto Scaling**.
+
+## 9. Verificação
+
+Após alguns minutos, o Auto Scaling Group lançará as instâncias, o script de user-data será executado, e o WordPress será iniciado.
+
+1. Acesse o serviço **EC2** > **Load Balancers**.
+
+2. Selecione o balanceador de carga criado anteriormente e copie o **"Nome DNS"**.
+
+3. Cole o nome DNS em seu navegador (Adicione o `http://`). Você deverá ver a tela de configuração inicial do WordPress.
+
+![wp-config](assets/wp-config.png)
+
+## 10. Conclusão
+
+Com este guia, foi possível criar uma arquitetura escalável e de alta disponibilidade para uma aplicação WordPress na AWS. Os principais benefícios são a capacidade de lidar com picos de tráfego automaticamente a separação de responsabilidades entre os componentes da aplicação.
