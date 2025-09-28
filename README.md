@@ -129,9 +129,8 @@ Criação do banco de dados:
     - **Acesso público**: `Não`.
     - **Grupo de segurança da VPC**: Escolha **"Selecionar existentes"** e adicione o `rds-sg`.
 
-> [!IMPORTANT]
-> É importante adicionar um nome inicial, pois, caso contrário, você terá que adicioná-lo manualmente e não conseguirá se conectar ao banco de
-> dados sem ele.
+[!NOTE]
+> É importante definir um nome inicial para o banco de dados, pois o WordPress precisará dele durante a configuração.
 
 7.  Em **"Configuração adicional"**, defina um **nome inicial do banco de dados** (ex: `wordpress_db`).
 
@@ -215,7 +214,9 @@ Após a criação, anote o **endpoint (nome do host)** do banco de dados.
 
 7.  Expanda a seção **"Detalhes avançados"** e cole o script abaixo no campo **"Dados do usuário" (User-data)**. 
 
-**Substitua os valores!**
+[!WARNING]
+> Substitua os valores de variáveis no script abaixo com as informações do seu EFS e RDS antes de criar
+> o modelo.
 
 ```bash
 #!/bin/bash
